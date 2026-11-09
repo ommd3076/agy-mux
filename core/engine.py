@@ -313,6 +313,9 @@ class BrowserEngine:
                 f"--user-data-dir={str(self.user_data_dir)}",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-features=CalculateNativeWinOcclusion",
             ]
             if start_url:
                 cmd.append(start_url)
@@ -365,7 +368,7 @@ class BrowserEngine:
             await self.disconnect()
             raise CDPError(f"Failed to connect to browser over CDP at {self.endpoint}: {exc}") from exc
 
-    async def connect_over_cdp(
+    async def connect_with_profile(
         self,
         port: int = 9222,
         profile_dir: str | Path = ".agent_browser_profile",
@@ -406,6 +409,39 @@ class BrowserEngine:
             self.browser_name = browser_name
 
         await self.connect(start_url=start_url, browser_name=browser_name or self.browser_name)
+
+    # Direct alias used by callers that expect the conventional method name.
+    connect_over_cdp = connect
+
+    async def get_or_open_target(
+        self,
+        url_substring: str = "figma.com",
+        fallback_url: str = "https://www.figma.com",
+    ) -> TabSession:
+        """Attach to a matching page or navigate the managed blank tab to fallback_url."""
+        await self.connect()
+        assert self._browser is not None
+        needle = url_substring.casefold()
+        pages = [page for context in self._browser.contexts for page in context.pages]
+        selected = next((page for page in pages if needle in page.url.casefold()), None)
+        if selected is None:
+            selected = next((page for page in pages if page.url in {"about:blank", "chrome://newtab/", "edge://newtab/"}), None)
+            if selected is None:
+                context = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
+                selected = await context.new_page()
+            await selected.goto(fallback_url, wait_until="domcontentloaded")
+
+        context = selected.context
+        cdp = await context.new_cdp_session(selected)
+        try:
+            info = await cdp.send("Target.getTargetInfo")
+            target_id = info.get("targetInfo", {}).get("targetId")
+        finally:
+            await cdp.detach()
+        if not target_id:
+            raise CDPError("Could not resolve target ID for selected page")
+        return await self.attach_target(str(target_id))
+
 
     async def attach_target(self, target: Target | str) -> TabSession:
         """Attach to an explicitly selected existing Chromium tab.
