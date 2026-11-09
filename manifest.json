@@ -1,6 +1,6 @@
 {
   "name": "agy-computer-use-engine",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Async, target-scoped browser automation powered primarily by Playwright connect_over_cdp with per-page CDPSession fallback for canvas and Fetch interception",
   "runtime": "Python >= 3.11",
   "entrypoint": "core.engine:main",
@@ -25,6 +25,7 @@
   "limitations": {
     "background_execution": "no_guaranteed_unthrottled_background_execution",
     "throttling": "subject_to_browser_and_os_lifecycle_throttling",
-    "webgl_canvas": "no_dom_access_within_canvas_pixel_buffers"
+    "webgl_canvas": "no_dom_access_within_canvas_pixel_buffers",
+    "interception_guarantee": "best_effort_continuation_with_failure_metrics"
   }
 }

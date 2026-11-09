@@ -15,8 +15,8 @@ The engine connects to a local Chromium-based browser via loopback, discovers ex
    - Deep accessibility trees (`Accessibility.getFullAXTree`).
 3. **Explicit Tab Scope & Preservation**: The engine only attaches to explicitly selected existing Chromium tabs. It never opens new tabs or contexts (`new_page()` / `new_context()`), and it never closes pages or contexts (`page.close()` / `context.close()`). Upon disconnect or detachment, CDPSessions detach cleanly, leaving user tabs alive.
 4. **Tab-Scoped Input Serialization**: Every attached tab has a dedicated `asyncio.Lock` serializing all DOM actions, canvas events, text insertions, and evaluations. Parallelization is supported across distinct tabs only.
-5. **Bounded Non-Blocking Network Observation**: Passive response metadata observation uses a bounded queue (`BoundedMetricQueue`). When full, it drops the oldest item and increments an overflow metric without stalling network traffic.
-6. **Deliberate Protocol Fallback on Continuation**: Opt-in Fetch response interception enforces hard timeouts on paused events. On watchdog timeouts, queue overflow, or teardown, the engine executes a deliberate protocol fallback (`Fetch.continueResponse` falling back to `Fetch.continueRequest`) and records explicit metrics and errors on failure to keep the paused request lifecycle safe without hanging browser tabs.
+5. **Bounded Non-Blocking Network Observation**: Passive response metadata observation uses a bounded queue (`BoundedMetricQueue`). When full, it drops the oldest item and increments an overflow metric without stalling network traffic. Sensitive headers (`authorization`, `cookie`, `set-cookie`, `proxy-authorization`, tokens/API keys) are automatically redacted.
+6. **Deliberate Protocol Fallback on Continuation**: Opt-in Fetch response interception enforces hard timeouts on paused events. On watchdog timeouts, queue overflow, or teardown, the engine executes a deliberate best-effort protocol fallback (`Fetch.continueResponse` falling back to `Fetch.continueRequest`) and records explicit metrics and errors on failure. The engine does not make an absolute guarantee that network continuations never fail; unreleased requests increment explicit failure metrics.
 
 ---
 
@@ -25,6 +25,7 @@ The engine connects to a local Chromium-based browser via loopback, discovers ex
 - **No Guaranteed Background Execution**: Background tabs in Chromium are subject to browser timer throttling, background process priorities, and lifecycle state changes (freezing, memory pressure discarding). The engine does not claim guaranteed unthrottled background execution.
 - **No WebGL / Canvas DOM Access**: HTML5 `<canvas>` and WebGL render to internal pixel buffers without exposing DOM nodes or accessibility elements for internal 3D/2D objects. Canvas interactions rely on coordinate-based input via the CDPSession fallback.
 - **Loopback Enforcement**: The debugging endpoint must be on loopback (`127.0.0.1`, `localhost`, or `::1`). External network debugging endpoints are rejected.
+- **Best-Effort Continuation with Failure Metrics**: Response interception uses a timeout watchdog and protocol fallback (`continueResponse` -> `continueRequest`), but does not claim an absolute guarantee that the browser will never stall or fail a continuation. Continuation failures increment explicit failure counters (`continuation_failure_count`).
 
 ---
 
@@ -113,11 +114,11 @@ asyncio.run(main())
 - `canvas_drag(start_x, start_y, end_x, end_y, steps=5)`: Interpolates drag movement between coordinates.
 
 ### Passive Network Observation
-- `observe_network(buffer_size=128)`: Returns a `BoundedMetricQueue` receiving `{url, status, status_text, headers, ok, request}`. Drops oldest and increments `queue.overflow_count` on overflow.
+- `observe_network(buffer_size=128)`: Returns a `BoundedMetricQueue` receiving `{url, status, status_text, headers, ok, request}`. Sensitive headers (`authorization`, `cookie`, `set-cookie`, `proxy-authorization`, API keys/tokens) are redacted to `[REDACTED]`. Drops oldest and increments `queue.overflow_count` on overflow.
 - `stop_network_observation(queue)`: Unsubscribes the observer.
 
 ### Opt-In Response Interception
-- `intercept_responses(buffer_size=64, timeout_s=10.0)`: Pauses HTTP responses for inspection. Enforces hard timeout watchdog; auto-continues via protocol fallback (`continueResponse` -> `continueRequest`) on timeout or queue overflow.
+- `intercept_responses(buffer_size=64, timeout_s=10.0)`: Pauses HTTP responses for inspection. Enforces hard timeout watchdog; attempts best-effort auto-continuation via protocol fallback (`continueResponse` -> `continueRequest`) on timeout or queue overflow.
 - `continue_response(event)`: Releases a paused request/response with deliberate protocol fallback; raises `CDPError` if continuation fails.
 - `stop_response_interception(queue)`: Drains and safely attempts continuation for all queued events before disabling Fetch interception.
 - `skills.continuation_failure_count`: Counter tracking failed continuation attempts.

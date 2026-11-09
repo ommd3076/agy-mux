@@ -216,6 +216,12 @@ class BrowserEngine:
         await self.connect()
         assert self._browser is not None
 
+        if isinstance(target, str) and (target.startswith("http://") or target.startswith("https://")):
+            raise ValueError(
+                f"Attachment by URL string {target!r} is rejected to prevent ambiguous target selection. "
+                "Pass a Target from list_targets() or an explicit target_id."
+            )
+
         target_id = target.target_id if isinstance(target, Target) else str(target)
         existing = self._attached_tabs.get(target_id)
         if existing and existing.is_attached:
@@ -243,28 +249,21 @@ class BrowserEngine:
                         except Exception:
                             pass
 
-                page_url = page.url
-                page_title = await page.title()
-
-                if p_target_id == target_id or (isinstance(target, Target) and p_target_id == target.target_id):
+                if p_target_id == target_id:
                     matched_page = page
                     resolved_target_id = p_target_id
-                    resolved_title = page_title
-                    resolved_url = page_url
-                    break
-
-                if not matched_page and (target == page_url or (isinstance(target, Target) and target.url == page_url)):
-                    matched_page = page
-                    resolved_target_id = p_target_id or target_id
-                    resolved_title = page_title
-                    resolved_url = page_url
+                    try:
+                        resolved_title = await page.title()
+                    except Exception:
+                        resolved_title = ""
+                    resolved_url = page.url
                     break
             if matched_page is not None:
                 break
 
         if matched_page is None:
             raise TargetNotFoundError(
-                f"No existing Chromium tab matches target {target!r}. "
+                f"No existing Chromium tab matches target ID {target_id!r}. "
                 "The engine only attaches to explicitly selected existing tabs and never opens new ones."
             )
 

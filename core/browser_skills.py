@@ -6,16 +6,17 @@ Architecture:
 - Tab isolation: All actions on the tab are serialized by TabSession.lock.
 - Passive network observations: Bounded non-blocking queue, drops oldest and increments
   an overflow metric on queue saturation.
-- Response interception: Opt-in with mandatory hard timeouts, deliberate protocol fallback
-  (Fetch.continueResponse to Fetch.continueRequest), and explicit error/metric tracking on failure.
+- Response interception: Opt-in with best-effort timeout watchdog, deliberate protocol fallback
+  (Fetch.continueResponse to Fetch.continueRequest), and explicit error/metric tracking on failure
+  without claiming an absolute guarantee that requests can never remain paused.
 - Transparent limits: No DOM access within WebGL pixel buffers; no unthrottled background claims.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -25,6 +26,32 @@ from core.engine import CDPError, EngineError, TabSession, BrowserEngine
 
 LOG = logging.getLogger("agy_skills")
 T = TypeVar("T")
+
+REDACTED_HEADER_VALUE = "[REDACTED]"
+SENSITIVE_HEADER_NAMES = frozenset({
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "proxy-authorization",
+})
+SENSITIVE_HEADER_PATTERN = re.compile(
+    r"^(?:authorization|cookie|set-cookie|proxy-authorization|.*(?:api[_-]?key|token|secret|credential|auth|bearer).*)$",
+    re.IGNORECASE,
+)
+
+
+def redact_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    """Redact sensitive headers (authorization, cookies, tokens, api keys) from observations."""
+    if not headers:
+        return {}
+    sanitized: dict[str, str] = {}
+    for key, value in headers.items():
+        lower_key = key.lower().strip()
+        if lower_key in SENSITIVE_HEADER_NAMES or SENSITIVE_HEADER_PATTERN.match(lower_key):
+            sanitized[key] = REDACTED_HEADER_VALUE
+        else:
+            sanitized[key] = value
+    return sanitized
 
 
 class BoundedMetricQueue(asyncio.Queue[T]):
@@ -101,6 +128,11 @@ class BrowserSkills:
         self.last_continuation_error: Exception | None = None
         self.tab.register_skills(self)
 
+    def _check_attached(self) -> None:
+        """Reject actions if the underlying tab session has been detached."""
+        if not self.tab.is_attached:
+            raise EngineError(f"Tab {self.tab.target_id} is detached")
+
     async def close(self) -> None:
         """Shut down any active response interception and remove passive observers."""
         if self._interception_active and self._interception_queue is not None:
@@ -129,11 +161,13 @@ class BrowserSkills:
 
     async def aria_snapshot(self) -> str:
         """Retrieve the page ARIA accessibility snapshot using Playwright."""
+        self._check_attached()
         async with self.tab.lock:
             return await self.page.locator(":root").aria_snapshot()
 
     async def accessibility_tree(self, *, depth: int = 8) -> dict[str, Any]:
         """Retrieve full accessibility tree via CDPSession fallback with depth control."""
+        self._check_attached()
         if depth < 1 or depth > 32:
             raise ValueError("depth must be between 1 and 32")
         async with self.tab.lock:
@@ -143,6 +177,7 @@ class BrowserSkills:
 
     async def interactive_elements(self) -> list[ElementSnapshot]:
         """Snapshot visible interactive elements with stable selectors and bounds."""
+        self._check_attached()
         expression = """(() => {
             const elements = Array.from(document.querySelectorAll(
                 'button, a, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"]'
@@ -189,6 +224,7 @@ class BrowserSkills:
 
     async def click(self, selector: str, *, timeout_ms: int = 5000) -> None:
         """Click an element using Playwright locator actionability checks."""
+        self._check_attached()
         if not selector.strip():
             raise ValueError("selector must not be empty")
         if timeout_ms <= 0:
@@ -201,6 +237,7 @@ class BrowserSkills:
 
     async def type_text(self, selector: str, text: str, *, timeout_ms: int = 5000) -> None:
         """Focus an element and insert text without clearing previous content."""
+        self._check_attached()
         if not selector.strip():
             raise ValueError("selector must not be empty")
         if timeout_ms <= 0:
@@ -226,6 +263,7 @@ class BrowserSkills:
         click_count: int = 1,
     ) -> None:
         """Dispatch coordinate-based mouse click via CDPSession fallback for canvas/WebGL."""
+        self._check_attached()
         if button not in {"left", "middle", "right"}:
             raise ValueError("button must be 'left', 'middle', or 'right'")
         async with self.tab.lock:
@@ -255,6 +293,7 @@ class BrowserSkills:
 
     async def canvas_mouse_move(self, x: float, y: float) -> None:
         """Dispatch coordinate-based mouse move via CDPSession fallback."""
+        self._check_attached()
         async with self.tab.lock:
             cdp = await self.tab.get_cdp_session()
             await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
@@ -270,6 +309,7 @@ class BrowserSkills:
         button: str = "left",
     ) -> None:
         """Perform a coordinate-based drag on a canvas element."""
+        self._check_attached()
         if steps < 1:
             raise ValueError("steps must be at least 1")
         async with self.tab.lock:
@@ -302,6 +342,7 @@ class BrowserSkills:
 
     async def observe_network(self, *, buffer_size: int = 128) -> BoundedMetricQueue[dict[str, Any]]:
         """Observe response metadata via bounded non-blocking queue without pausing traffic."""
+        self._check_attached()
         if not 1 <= buffer_size <= 4096:
             raise ValueError("buffer_size must be between 1 and 4096")
         queue: BoundedMetricQueue[dict[str, Any]] = BoundedMetricQueue(maxsize=buffer_size)
@@ -312,13 +353,13 @@ class BrowserSkills:
                     "url": response.url,
                     "status": response.status,
                     "status_text": response.status_text,
-                    "headers": response.headers,
+                    "headers": redact_headers(response.headers),
                     "ok": response.ok,
                     "request": {
                         "method": response.request.method,
                         "url": response.request.url,
                         "resource_type": response.request.resource_type,
-                        "headers": response.request.headers,
+                        "headers": redact_headers(response.request.headers),
                     },
                 }
                 queue.put_dropping_oldest(data)
@@ -348,7 +389,8 @@ class BrowserSkills:
         buffer_size: int = 64,
         timeout_s: float = 10.0,
     ) -> BoundedMetricQueue[dict[str, Any]]:
-        """Pause responses for explicit inspection with guaranteed timeouts and continuations."""
+        """Pause responses for explicit inspection with best-effort timeout watchdog and protocol fallback."""
+        self._check_attached()
         if not 1 <= buffer_size <= 1024:
             raise ValueError("buffer_size must be between 1 and 1024")
         if timeout_s <= 0:
@@ -430,8 +472,10 @@ class BrowserSkills:
     async def continue_response(self, event: dict[str, Any]) -> None:
         """Release a paused Fetch event, cancelling any pending watchdog task.
 
-        Raises CDPError if both primary continuation and protocol fallback fail.
+        Attempts Fetch.continueResponse with fallback to Fetch.continueRequest;
+        raises CDPError if both primary continuation and protocol fallback fail.
         """
+        self._check_attached()
         request_id = event.get("requestId") or event.get("params", {}).get("requestId")
         if not request_id:
             raise ValueError("Event must contain a valid requestId")
@@ -453,7 +497,12 @@ class BrowserSkills:
         if queue is not self._interception_queue:
             raise ValueError("Queue is not registered for active response interception")
 
-        cdp = await self.tab.get_cdp_session()
+        cdp: CDPSession | None = None
+        if self.tab.is_attached:
+            try:
+                cdp = await self.tab.get_cdp_session()
+            except Exception as exc:
+                LOG.debug("Could not get cdp session during stop_response_interception: %s", exc)
 
         # Drain queued events
         while not queue.empty():
@@ -465,7 +514,8 @@ class BrowserSkills:
                     if task and not task.done():
                         task.cancel()
                     self._pending_events.pop(req_id, None)
-                    await self._safe_continue(cdp, req_id, ev)
+                    if cdp is not None:
+                        await self._safe_continue(cdp, req_id, ev)
             except asyncio.QueueEmpty:
                 break
 
@@ -474,22 +524,24 @@ class BrowserSkills:
             if not task.done():
                 task.cancel()
             ev = self._pending_events.get(req_id, {})
-            await self._safe_continue(cdp, req_id, ev)
+            if cdp is not None:
+                await self._safe_continue(cdp, req_id, ev)
 
         self._pending_timeouts.clear()
         self._pending_events.clear()
 
-        if self._interception_listener is not None:
+        if cdp is not None and self._interception_listener is not None:
             try:
                 cdp.remove_listener("Fetch.requestPaused", self._interception_listener)
             except Exception as exc:
                 LOG.debug("Error removing Fetch listener: %s", exc)
-            self._interception_listener = None
+        self._interception_listener = None
 
-        try:
-            await cdp.send("Fetch.disable")
-        except Exception as exc:
-            LOG.debug("Error sending Fetch.disable: %s", exc)
+        if cdp is not None:
+            try:
+                await cdp.send("Fetch.disable")
+            except Exception as exc:
+                LOG.debug("Error sending Fetch.disable: %s", exc)
 
         self._interception_active = False
         self._interception_queue = None

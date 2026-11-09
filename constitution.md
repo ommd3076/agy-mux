@@ -24,7 +24,7 @@ These rules govern the browser automation engine and its integrations.
 2. Each attached tab gets a dedicated `asyncio.Lock` serializing all inputs, clicks, text typing, canvas events, and evaluations. Parallelize across independent tabs only.
 3. Never claim guaranteed background execution, focus freedom, or throttling immunity. Chromium tabs in the background are subject to timer throttling, background tab lifecycle states (freezing, discarding under memory pressure), and platform energy policies.
 4. Passive network observations must use a bounded, non-blocking queue. When the queue overflows, drop the oldest record and increment an explicit overflow/dropped metric.
-5. Network interception must be opt-in, scoped, and enforce hard timeouts on paused events. On error, timeout, or teardown, the engine executes a deliberate protocol fallback (`Fetch.continueResponse` falling back to `Fetch.continueRequest`) and records explicit metrics and errors on failure to keep the paused request lifecycle safe without hanging tabs.
+5. Network interception must be opt-in, scoped, and enforce hard timeouts on paused events. On error, timeout, or teardown, the engine executes a best-effort deliberate protocol fallback (`Fetch.continueResponse` falling back to `Fetch.continueRequest`) and records explicit metrics and errors on failure. The engine does not claim an absolute guarantee that requests can never remain paused by the underlying browser/network stack under all failure modes; continuation is best-effort and failure metrics track any unreleased requests.
 6. Do not weaken browser security flags or disable security checks as a default.
 
 ## Change management and repository synchronization
