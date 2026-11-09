@@ -1,0 +1,22 @@
+{
+  "name": "agy-computer-use-engine",
+  "version": "0.1.0",
+  "description": "Async, target-scoped browser automation over Chrome DevTools Protocol",
+  "runtime": "Python >= 3.11",
+  "entrypoint": "core.engine:main",
+  "capabilities": [
+    "cdp_target_discovery",
+    "dom_accessibility_snapshotting",
+    "target_scoped_input_dispatch",
+    "text_injection",
+    "opt_in_network_observation"
+  ],
+  "bindings": {
+    "transport": "websocket",
+    "default_endpoint": "http://127.0.0.1:9222",
+    "scope": "selected_page_target"
+  },
+  "dependencies": {
+    "websockets": ">=12.0,<16"
+  }
+}
