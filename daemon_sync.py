@@ -86,6 +86,16 @@ def validate(root: Path) -> None:
     entrypoint = manifest.get("entrypoint", "").split(":", 1)[0]
     if not entrypoint or not (root / (entrypoint.replace(".", os.sep) + ".py")).is_file():
         raise SyncError("manifest entrypoint does not point to a Python module")
+    requirements_path = root / "requirements.txt"
+    if not requirements_path.is_file():
+        raise SyncError("requirements.txt is missing")
+    req_text = requirements_path.read_text(encoding="utf-8").lower()
+    for dep in manifest.get("dependencies", {}).keys():
+        if dep.lower() not in req_text:
+            raise SyncError(f"manifest dependency {dep!r} missing from requirements.txt")
+    constitution_path = root / "constitution.md"
+    if not constitution_path.is_file():
+        raise SyncError("constitution.md is missing")
     for source in root.rglob("*.py"):
         if any(part in SKIP_DIRS for part in source.relative_to(root).parts):
             continue

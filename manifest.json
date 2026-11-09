@@ -1,23 +1,30 @@
 {
   "name": "agy-computer-use-engine",
-  "version": "0.1.0",
-  "description": "Async, target-scoped browser automation over Chrome DevTools Protocol",
+  "version": "0.2.1",
+  "description": "Async, target-scoped browser automation powered primarily by Playwright connect_over_cdp with per-page CDPSession fallback for canvas and Fetch interception",
   "runtime": "Python >= 3.11",
   "entrypoint": "core.engine:main",
   "capabilities": [
-    "cdp_target_discovery",
-    "dom_accessibility_snapshotting",
-    "target_scoped_input_dispatch",
-    "text_injection",
-    "opt_in_network_observation",
-    "opt_in_response_interception"
+    "playwright_connect_over_cdp",
+    "target_discovery_and_selection",
+    "dom_interaction_and_snapshotting",
+    "tab_scoped_input_serialization",
+    "canvas_coordinate_cdp_fallback",
+    "bounded_passive_network_observation",
+    "opt_in_fetch_interception_with_timeout"
   ],
   "bindings": {
-    "transport": "websocket",
+    "transport": "playwright_cdp",
     "default_endpoint": "http://127.0.0.1:9222",
-    "scope": "selected_page_target"
+    "scope": "selected_page_target",
+    "tab_lifecycle": "never_close_pages_or_contexts"
   },
   "dependencies": {
-    "websockets": ">=13.0,<16"
+    "playwright": ">=1.49.0"
+  },
+  "limitations": {
+    "background_execution": "no_guaranteed_unthrottled_background_execution",
+    "throttling": "subject_to_browser_and_os_lifecycle_throttling",
+    "webgl_canvas": "no_dom_access_within_canvas_pixel_buffers"
   }
 }
