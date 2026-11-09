@@ -7,9 +7,16 @@ import base64
 import hashlib
 import json
 import os
+import sys
 import time
 import urllib.request
+from pathlib import Path
 from typing import Any
+
+# Ensure workspace root is in sys.path when executed directly as a script
+_WORKSPACE_ROOT = str(Path(__file__).resolve().parent.parent)
+if _WORKSPACE_ROOT not in sys.path:
+    sys.path.insert(0, _WORKSPACE_ROOT)
 
 from core.browser_skills import BrowserSkills
 from core.engine import BrowserEngine, TabSession
@@ -39,8 +46,9 @@ class ComputerUseAgent:
           }
         }""")
 
-    async def _cursor(self, x: float, y: float, agent_name: str) -> None:
-        color = "#" + hashlib.sha256(agent_name.encode()).hexdigest()[:6]
+    async def _cursor(self, x: float, y: float, agent_name: str, color: str | None = None) -> None:
+        if not color:
+            color = "#" + hashlib.sha256(agent_name.encode()).hexdigest()[:6]
         await self.tab.page.evaluate("""({x,y,name,color}) => {
           const el=document.getElementById('agy-agent-cursor'); if(!el)return;
           el.style.transform=`translate3d(${x}px,${y}px,0)`;
@@ -54,12 +62,12 @@ class ComputerUseAgent:
         result = await self.cdp.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})
         return result["data"]
 
-    async def execute_action(self, action: dict, agent_name: str = "CUA") -> str:
+    async def execute_action(self, action: dict, agent_name: str = "CUA", color: str | None = None) -> str:
         assert self.cdp is not None, "Call attach() first"
         kind = str(action.get("action", "screenshot")).lower()
         x, y = float(action.get("x", 0)), float(action.get("y", 0))
         async with self.tab.lock:
-            await self._cursor(x, y, agent_name)
+            await self._cursor(x, y, agent_name, color=color)
             await self.cdp.send("Input.dispatchMouseEvent", {"type":"mouseMoved", "x":x, "y":y})
             if kind in {"click", "double_click"}:
                 count = 2 if kind == "double_click" else 1
@@ -72,13 +80,13 @@ class ComputerUseAgent:
                 sx, sy = float(action.get("start_x",x)), float(action.get("start_y",y))
                 ex, ey = float(action.get("end_x",x)), float(action.get("end_y",y))
                 steps = max(2, int(action.get("steps", 12)))
-                await self._cursor(sx,sy,agent_name)
+                await self._cursor(sx,sy,agent_name, color=color)
                 await self.cdp.send("Input.dispatchMouseEvent", {"type":"mouseMoved","x":sx,"y":sy})
                 await self.cdp.send("Input.dispatchMouseEvent", {"type":"mousePressed","x":sx,"y":sy,"button":"left"})
                 try:
                     for i in range(1,steps+1):
                         px,py=sx+(ex-sx)*i/steps,sy+(ey-sy)*i/steps
-                        await self._cursor(px,py,agent_name)
+                        await self._cursor(px,py,agent_name, color=color)
                         await self.cdp.send("Input.dispatchMouseEvent", {"type":"mouseMoved","x":px,"y":py,"button":"left"})
                         await asyncio.sleep(.025)
                 finally:
@@ -89,8 +97,14 @@ class ComputerUseAgent:
                 await self.cdp.send("Input.insertText", {"text":str(action.get("text",""))})
             elif kind == "keypress":
                 key = str(action.get("key","Enter")); mods = int(action.get("modifiers",0))
-                await self.cdp.send("Input.dispatchKeyEvent", {"type":"keyDown","key":key,"modifiers":mods})
-                await self.cdp.send("Input.dispatchKeyEvent", {"type":"keyUp","key":key,"modifiers":mods})
+                code = str(action.get("code",""))
+                payload_down: dict[str, Any] = {"type":"keyDown","key":key,"modifiers":mods}
+                payload_up: dict[str, Any] = {"type":"keyUp","key":key,"modifiers":mods}
+                if code:
+                    payload_down["code"] = code
+                    payload_up["code"] = code
+                await self.cdp.send("Input.dispatchKeyEvent", payload_down)
+                await self.cdp.send("Input.dispatchKeyEvent", payload_up)
             elif kind == "wait":
                 await asyncio.sleep(max(0,float(action.get("seconds",1))))
             elif kind != "screenshot":
