@@ -255,11 +255,18 @@ class BrowserEngine:
             if row.get("type") == "page"
         ]
 
-    async def connect(self) -> None:
+    async def connect(self, *, start_url: str | None = None) -> None:
         """Connect Playwright to the remote Chromium browser via CDP.
 
         If no browser is exposing the configured loopback CDP endpoint, automatically
         bootstraps a dedicated managed browser process with an isolated persistent profile.
+
+        Parameters
+        ----------
+        start_url: str | None
+            On cold launch, passed as the browser's initial URL without opening extra tabs.
+            On a warm existing CDP endpoint, ignored (no process is spawned and no tabs
+            are created or navigated).
         """
         if self._browser is not None:
             return
@@ -287,6 +294,8 @@ class BrowserEngine:
                 "--no-first-run",
                 "--no-default-browser-check",
             ]
+            if start_url:
+                cmd.append(start_url)
 
             creationflags = 0
             startupinfo = None
@@ -335,6 +344,42 @@ class BrowserEngine:
         except Exception as exc:
             await self.disconnect()
             raise CDPError(f"Failed to connect to browser over CDP at {self.endpoint}: {exc}") from exc
+
+    async def connect_over_cdp(
+        self,
+        port: int = 9222,
+        profile_dir: str | Path = ".agent_browser_profile",
+        start_url: str | None = None,
+    ) -> None:
+        """Connect to or bootstrap a local browser over CDP.
+
+        Honors the requested loopback port and profile directory, then delegates
+        to the existing connect() bootstrap/reattach implementation.
+
+        Parameters
+        ----------
+        port: int
+            The loopback debugging port (default 9222).
+        profile_dir: str | Path
+            The persistent profile directory (default ".agent_browser_profile").
+            If relative, resolved under Path.home() outside the repository.
+        start_url: str | None
+            On cold launch, passed as the browser's initial URL without opening extra tabs.
+            On a warm existing CDP endpoint, ignored (no process is spawned and no tabs
+            are created or navigated).
+        """
+        if not (1 <= port <= 65535):
+            raise ValueError(f"port must be between 1 and 65535, got {port}")
+        parts = urlsplit(self.endpoint)
+        host = parts.hostname or "127.0.0.1"
+        self.endpoint = f"http://{host}:{port}"
+
+        profile_path = Path(profile_dir)
+        if not profile_path.is_absolute():
+            profile_path = Path.home() / profile_path
+        self.user_data_dir = profile_path
+
+        await self.connect(start_url=start_url)
 
     async def attach_target(self, target: Target | str) -> TabSession:
         """Attach to an explicitly selected existing Chromium tab.
