@@ -11,7 +11,8 @@
     "tab_scoped_input_serialization",
     "canvas_coordinate_cdp_fallback",
     "bounded_passive_network_observation",
-    "opt_in_fetch_interception_with_timeout"
+    "opt_in_fetch_interception_with_timeout",
+    "managed_cdp_browser_bootstrap"
   ],
   "bindings": {
     "transport": "playwright_cdp",

@@ -21,7 +21,10 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 import urllib.error
@@ -149,6 +152,40 @@ class TabSession:
         self._attached = False
 
 
+def resolve_browser_binary() -> Path | None:
+    """Resolve installed msedge.exe or brave.exe from standard Windows directories (or PATH)."""
+    if os.name == "nt":
+        candidate_roots: list[Path] = []
+        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            val = os.environ.get(env_var)
+            if val:
+                candidate_roots.append(Path(val))
+
+        for fallback in (r"C:\Program Files", r"C:\Program Files (x86)"):
+            p = Path(fallback)
+            if p not in candidate_roots:
+                candidate_roots.append(p)
+
+        relative_subpaths = [
+            Path("Microsoft/Edge/Application/msedge.exe"),
+            Path("BraveSoftware/Brave-Browser/Application/brave.exe"),
+        ]
+
+        for root in candidate_roots:
+            for subpath in relative_subpaths:
+                candidate = root / subpath
+                if candidate.is_file():
+                    return candidate
+    else:
+        import shutil
+        for name in ("msedge", "brave-browser", "brave", "google-chrome", "chromium"):
+            found = shutil.which(name)
+            if found:
+                return Path(found)
+
+    return None
+
+
 class BrowserEngine:
     """Connect to a local browser over CDP and control selected page tabs.
 
@@ -157,15 +194,43 @@ class BrowserEngine:
     and user tabs/contexts are never closed.
     """
 
-    def __init__(self, endpoint: str = "http://127.0.0.1:9222", *, timeout: float = 15.0) -> None:
+    def __init__(
+        self,
+        endpoint: str = "http://127.0.0.1:9222",
+        *,
+        timeout: float = 15.0,
+        user_data_dir: Path | str | None = None,
+    ) -> None:
         parts = urlsplit(endpoint)
         if parts.scheme not in {"http", "https"} or parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("CDP endpoint must use HTTP(S) on loopback (127.0.0.1, localhost, or ::1)")
         self.endpoint = endpoint.rstrip("/")
         self.timeout = timeout
+        self.user_data_dir = (
+            Path(user_data_dir) if user_data_dir is not None else Path.home() / ".agent-browser-profile"
+        )
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._attached_tabs: dict[str, TabSession] = {}
+
+    def _check_cdp_available(self, timeout: float = 0.5) -> dict[str, Any] | None:
+        """Query /json/version over loopback with a short timeout.
+
+        Returns parsed version dictionary if CDP is responding and valid, else None.
+        """
+        request = urllib.request.Request(
+            f"{self.endpoint}/json/version",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                if response.status == 200:
+                    data = json.loads(response.read())
+                    if isinstance(data, dict) and data.get("webSocketDebuggerUrl"):
+                        return data
+        except Exception:
+            return None
+        return None
 
     def _http_json(self, path: str) -> Any:
         request = urllib.request.Request(f"{self.endpoint}{path}", headers={"Accept": "application/json"})
@@ -191,12 +256,76 @@ class BrowserEngine:
         ]
 
     async def connect(self) -> None:
-        """Connect Playwright to the remote Chromium browser via CDP."""
+        """Connect Playwright to the remote Chromium browser via CDP.
+
+        If no browser is exposing the configured loopback CDP endpoint, automatically
+        bootstraps a dedicated managed browser process with an isolated persistent profile.
+        """
         if self._browser is not None:
             return
         parts = urlsplit(self.endpoint)
         if parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("Refusing connection to non-loopback endpoint")
+
+        # 1. Probe <endpoint>/json/version; if already active, attach without spawning
+        version_info = await asyncio.to_thread(self._check_cdp_available, 0.5)
+        if not (version_info and version_info.get("webSocketDebuggerUrl")):
+            # 2. Resolve browser binary from standard locations
+            binary = resolve_browser_binary()
+            if binary is None:
+                raise EngineError(
+                    f"No supported Chromium browser binary (msedge.exe, brave.exe) found in standard locations, "
+                    f"and no active CDP endpoint was reachable at {self.endpoint}"
+                )
+
+            port = parts.port or 9222
+            self.user_data_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                str(binary),
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={str(self.user_data_dir)}",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ]
+
+            creationflags = 0
+            startupinfo = None
+            if os.name == "nt":
+                creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 4  # SW_SHOWNOACTIVATE
+
+            LOG.info("Bootstrapping managed browser process: %s on port %d", binary, port)
+            try:
+                subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creationflags,
+                    startupinfo=startupinfo,
+                    close_fds=True,
+                )
+            except Exception as exc:
+                raise EngineError(f"Failed to launch browser binary {binary} on port {port}: {exc}") from exc
+
+            # 3. Bounded readiness polling (250 ms, max 10 s)
+            deadline = asyncio.get_running_loop().time() + 10.0
+            version_info = None
+            while asyncio.get_running_loop().time() < deadline:
+                version_info = await asyncio.to_thread(self._check_cdp_available, 0.25)
+                if version_info and version_info.get("webSocketDebuggerUrl"):
+                    break
+                await asyncio.sleep(0.25)
+
+            if not version_info or not version_info.get("webSocketDebuggerUrl"):
+                raise EngineError(
+                    f"Managed browser failed to expose valid CDP endpoint at {self.endpoint} within 10.0s "
+                    "(webSocketDebuggerUrl missing or endpoint unresponsive)"
+                )
+
+        # 4. Connect Playwright over CDP to the validated endpoint
         try:
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.connect_over_cdp(
@@ -332,10 +461,10 @@ class BrowserEngine:
 
 
 async def _main(endpoint: str) -> None:
-    engine = BrowserEngine(endpoint)
-    targets = await engine.list_targets()
-    for target in targets:
-        print(json.dumps({"id": target.target_id, "title": target.title, "url": target.url}))
+    async with BrowserEngine(endpoint) as engine:
+        targets = await engine.list_targets()
+        for target in targets:
+            print(json.dumps({"id": target.target_id, "title": target.title, "url": target.url}))
 
 
 def main() -> None:
