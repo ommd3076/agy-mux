@@ -10,10 +10,10 @@ Run `python -m core.engine --endpoint http://127.0.0.1:9222` to list discoverabl
 
 ## Skills
 
-`BrowserSkills` provides accessibility tree retrieval, visible interactive element snapshots, selector-based CDP clicks, focused text insertion, and opt-in response metadata observation. Network observation records response metadata only; it does not intercept or rewrite traffic. App-specific model APIs or MCP integrations should be preferred when available.
+`BrowserSkills` provides accessibility tree retrieval, visible interactive element snapshots, selector-based CDP clicks, focused text insertion, passive response metadata observation, and opt-in paused response interception. Intercepted responses must be continued with `continue_response`; otherwise the page request remains paused. The engine does not rewrite response data. App-specific model APIs or MCP integrations should be preferred when available.
 
 ## Git sync
 
-`daemon_sync.py --dry-run` reports the current worktree status. It intentionally has no timer and never stages, commits, or pushes automatically. Review and publish changes with explicit Git commands after validation.
+`daemon_sync.py --dry-run` validates Python syntax, the manifest entrypoint, whitespace, and changed files for common credential patterns without modifying Git state. `daemon_sync.py --once` runs one guarded sync cycle. With no mode flag, the daemon repeats every 16 minutes, stages changes, runs the same checks, commits, and pushes `main` to `origin`. It refuses other branches, scans candidate files before staging, uses a single-instance lock, and retries unpushed local commits on later cycles. Keep the daemon attached to a dedicated checkout so it cannot publish unrelated workspace files.
 
 See `constitution.md` for operational boundaries and `manifest.json` for declared capabilities.

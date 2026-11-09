@@ -9,7 +9,8 @@
     "dom_accessibility_snapshotting",
     "target_scoped_input_dispatch",
     "text_injection",
-    "opt_in_network_observation"
+    "opt_in_network_observation",
+    "opt_in_response_interception"
   ],
   "bindings": {
     "transport": "websocket",
@@ -17,6 +18,6 @@
     "scope": "selected_page_target"
   },
   "dependencies": {
-    "websockets": ">=12.0,<16"
+    "websockets": ">=13.0,<16"
   }
 }

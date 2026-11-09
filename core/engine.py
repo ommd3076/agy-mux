@@ -133,7 +133,13 @@ class BrowserEngine:
         ]
 
     async def connect_target(self, target: Target) -> CDPSession:
-        if not target.websocket_url.startswith(("ws://127.0.0.1", "ws://localhost", "wss://127.0.0.1", "wss://localhost")):
+        parts = urlsplit(target.websocket_url)
+        if (
+            parts.scheme not in {"ws", "wss"}
+            or parts.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parts.username is not None
+            or parts.password is not None
+        ):
             raise CDPError("Refusing non-loopback target WebSocket")
         socket = await websockets.connect(target.websocket_url, open_timeout=self.timeout, max_size=8 * 1024 * 1024)
         return CDPSession(socket, timeout=self.timeout)
@@ -149,6 +155,7 @@ class BrowserEngine:
             detail = result["exceptionDetails"].get("text", "JavaScript evaluation failed")
             raise CDPError(detail)
         return result.get("result", {}).get("value")
+
 
 async def _main(endpoint: str) -> None:
     engine = BrowserEngine(endpoint)
