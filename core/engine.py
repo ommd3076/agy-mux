@@ -152,7 +152,7 @@ class TabSession:
         self._attached = False
 
 
-def resolve_browser_binary() -> Path | None:
+def resolve_browser_binary(preference: str | None = None) -> Path | None:
     """Resolve installed msedge.exe or brave.exe from standard Windows directories (or PATH)."""
     if os.name == "nt":
         candidate_roots: list[Path] = []
@@ -166,10 +166,21 @@ def resolve_browser_binary() -> Path | None:
             if p not in candidate_roots:
                 candidate_roots.append(p)
 
-        relative_subpaths = [
-            Path("Microsoft/Edge/Application/msedge.exe"),
-            Path("BraveSoftware/Brave-Browser/Application/brave.exe"),
-        ]
+        if preference and "brave" in preference.lower():
+            relative_subpaths = [
+                Path("BraveSoftware/Brave-Browser/Application/brave.exe"),
+                Path("Microsoft/Edge/Application/msedge.exe"),
+            ]
+        elif preference and "edge" in preference.lower():
+            relative_subpaths = [
+                Path("Microsoft/Edge/Application/msedge.exe"),
+                Path("BraveSoftware/Brave-Browser/Application/brave.exe"),
+            ]
+        else:
+            relative_subpaths = [
+                Path("Microsoft/Edge/Application/msedge.exe"),
+                Path("BraveSoftware/Brave-Browser/Application/brave.exe"),
+            ]
 
         for root in candidate_roots:
             for subpath in relative_subpaths:
@@ -178,7 +189,12 @@ def resolve_browser_binary() -> Path | None:
                     return candidate
     else:
         import shutil
-        for name in ("msedge", "brave-browser", "brave", "google-chrome", "chromium"):
+        names = (
+            ("brave-browser", "brave", "msedge", "google-chrome", "chromium")
+            if preference and "brave" in preference.lower()
+            else ("msedge", "brave-browser", "brave", "google-chrome", "chromium")
+        )
+        for name in names:
             found = shutil.which(name)
             if found:
                 return Path(found)
@@ -200,6 +216,7 @@ class BrowserEngine:
         *,
         timeout: float = 15.0,
         user_data_dir: Path | str | None = None,
+        browser_name: str | None = None,
     ) -> None:
         parts = urlsplit(endpoint)
         if parts.scheme not in {"http", "https"} or parts.hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -209,6 +226,7 @@ class BrowserEngine:
         self.user_data_dir = (
             Path(user_data_dir) if user_data_dir is not None else Path.home() / ".agent-browser-profile"
         )
+        self.browser_name = browser_name
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._attached_tabs: dict[str, TabSession] = {}
@@ -255,7 +273,7 @@ class BrowserEngine:
             if row.get("type") == "page"
         ]
 
-    async def connect(self, *, start_url: str | None = None) -> None:
+    async def connect(self, *, start_url: str | None = None, browser_name: str | None = None) -> None:
         """Connect Playwright to the remote Chromium browser via CDP.
 
         If no browser is exposing the configured loopback CDP endpoint, automatically
@@ -267,6 +285,8 @@ class BrowserEngine:
             On cold launch, passed as the browser's initial URL without opening extra tabs.
             On a warm existing CDP endpoint, ignored (no process is spawned and no tabs
             are created or navigated).
+        browser_name: str | None
+            Optional browser preference (e.g. 'brave', 'edge').
         """
         if self._browser is not None:
             return
@@ -278,7 +298,7 @@ class BrowserEngine:
         version_info = await asyncio.to_thread(self._check_cdp_available, 0.5)
         if not (version_info and version_info.get("webSocketDebuggerUrl")):
             # 2. Resolve browser binary from standard locations
-            binary = resolve_browser_binary()
+            binary = resolve_browser_binary(browser_name or self.browser_name)
             if binary is None:
                 raise EngineError(
                     f"No supported Chromium browser binary (msedge.exe, brave.exe) found in standard locations, "
@@ -350,6 +370,8 @@ class BrowserEngine:
         port: int = 9222,
         profile_dir: str | Path = ".agent_browser_profile",
         start_url: str | None = None,
+        *,
+        browser_name: str | None = None,
     ) -> None:
         """Connect to or bootstrap a local browser over CDP.
 
@@ -367,6 +389,8 @@ class BrowserEngine:
             On cold launch, passed as the browser's initial URL without opening extra tabs.
             On a warm existing CDP endpoint, ignored (no process is spawned and no tabs
             are created or navigated).
+        browser_name: str | None
+            Optional browser preference (e.g. 'brave', 'edge').
         """
         if not (1 <= port <= 65535):
             raise ValueError(f"port must be between 1 and 65535, got {port}")
@@ -378,8 +402,10 @@ class BrowserEngine:
         if not profile_path.is_absolute():
             profile_path = Path.home() / profile_path
         self.user_data_dir = profile_path
+        if browser_name:
+            self.browser_name = browser_name
 
-        await self.connect(start_url=start_url)
+        await self.connect(start_url=start_url, browser_name=browser_name or self.browser_name)
 
     async def attach_target(self, target: Target | str) -> TabSession:
         """Attach to an explicitly selected existing Chromium tab.
@@ -505,21 +531,25 @@ class BrowserEngine:
         await self.disconnect()
 
 
-async def _main(endpoint: str) -> None:
-    async with BrowserEngine(endpoint) as engine:
-        targets = await engine.list_targets()
-        for target in targets:
-            print(json.dumps({"id": target.target_id, "title": target.title, "url": target.url}))
+async def _main(endpoint: str, start_url: str | None = None, browser: str | None = None) -> None:
+    engine = BrowserEngine(endpoint, browser_name=browser)
+    await engine.connect_over_cdp(start_url=start_url)
+    targets = await engine.list_targets()
+    for target in targets:
+        print(json.dumps({"id": target.target_id, "title": target.title, "url": target.url}))
+    await engine.disconnect()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint", default="http://127.0.0.1:9222", help="Loopback browser debugging endpoint")
+    parser.add_argument("--url", default=None, help="Initial URL to open on cold launch")
+    parser.add_argument("--browser", default=None, help="Preferred browser (brave, edge)")
     parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     args = parser.parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s %(levelname)s %(name)s %(message)s")
     try:
-        asyncio.run(_main(args.endpoint))
+        asyncio.run(_main(args.endpoint, start_url=args.url, browser=args.browser))
     except (EngineError, ValueError) as exc:
         parser.exit(2, f"Engine error: {exc}\n")
 
