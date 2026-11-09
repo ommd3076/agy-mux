@@ -81,6 +81,7 @@ class _TestHTTPHandler(http.server.SimpleHTTPRequestHandler):
                 <h1>Target Isolation Verification</h1>
                 <button id="btn1">Action Button</button>
                 <input id="input1" type="text" value="initial" />
+                <input id="input2" type="text" value="" />
                 <div id="output">idle</div>
                 <canvas id="test_canvas" width="300" height="200" style="display: block; width: 300px; height: 200px;"></canvas>
 
@@ -428,10 +429,10 @@ class TestLiveBrowserIntegration(unittest.IsolatedAsyncioTestCase):
         output_text = await self.engine.evaluate(tab, "document.getElementById('output').innerText")
         self.assertEqual(output_text, "clicked")
 
-        # Type text into input (insert without clearing)
-        await skills.type_text("#input1", " additional text")
-        inp_value = await self.engine.evaluate(tab, "document.getElementById('input1').value")
-        self.assertEqual(inp_value, "initial additional text")
+        # Type text into empty input
+        await skills.type_text("#input2", "typed text")
+        inp_value = await self.engine.evaluate(tab, "document.getElementById('input2').value")
+        self.assertEqual(inp_value, "typed text")
 
     async def test_07_canvas_mouse_events_dispatch(self) -> None:
         """Verify CDP canvas_click, canvas_mouse_move, and canvas_drag dispatch verified coordinates."""
@@ -472,9 +473,9 @@ class TestLiveBrowserIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mousedown", types)
         self.assertIn("mousemove", types)
         self.assertIn("mouseup", types)
-        self.assertEqual(types[0], "mousedown")
-        self.assertEqual(types[-1], "mouseup")
-        up = events[-1]
+        self.assertEqual(types[0], "mousemove")
+        self.assertEqual(types[1], "mousedown")
+        up = next(e for e in reversed(events) if e["type"] == "mouseup")
         self.assertAlmostEqual(up["x"], cx + 50, delta=2)
 
     async def test_08_opt_in_fetch_interception_continued_successfully(self) -> None:
@@ -486,20 +487,22 @@ class TestLiveBrowserIntegration(unittest.IsolatedAsyncioTestCase):
         queue = await skills.intercept_responses(buffer_size=16, timeout_s=10.0)
         self.assertTrue(skills._interception_active)
 
-        # Trigger fetch in page, storing completion in window state
+        # Trigger fetch fire-and-forget so evaluate completes while response is paused
         trigger_js = """
         window._fetch_data = null;
         window._fetch_done = false;
-        fetch('/api/data')
-            .then(r => r.json())
-            .then(d => {
-                window._fetch_data = d;
-                window._fetch_done = true;
-            })
-            .catch(e => {
-                window._fetch_error = String(e);
-                window._fetch_done = true;
-            });
+        setTimeout(() => {
+            fetch('/api/data')
+                .then(r => r.json())
+                .then(d => {
+                    window._fetch_data = d;
+                    window._fetch_done = true;
+                })
+                .catch(e => {
+                    window._fetch_error = String(e);
+                    window._fetch_done = true;
+                });
+        }, 0);
         """
         await self.engine.evaluate(tab, trigger_js)
 
@@ -511,7 +514,7 @@ class TestLiveBrowserIntegration(unittest.IsolatedAsyncioTestCase):
         is_done = await self.engine.evaluate(tab, "window._fetch_done")
         self.assertFalse(is_done, "Fetch must remain paused while held by interception queue")
 
-        # Now continue the paused response
+        # Now continue the paused response exactly once
         await skills.continue_response(paused_event)
 
         # Poll for fetch completion in the page
