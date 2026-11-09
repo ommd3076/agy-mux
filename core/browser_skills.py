@@ -147,6 +147,11 @@ class BrowserSkills:
             except Exception as exc:
                 LOG.debug("Error stopping network observation on skills close: %s", exc)
 
+        try:
+            await self._remove_cursor_overlay()
+        except Exception as exc:
+            LOG.debug("Error removing cursor overlay on skills close: %s", exc)
+
         self.tab.unregister_skills(self)
 
     async def __aenter__(self) -> BrowserSkills:
@@ -154,6 +159,108 @@ class BrowserSkills:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.close()
+
+    # -------------------------------------------------------------------------
+    # Visual Agent Cursor Overlay Helpers
+    # -------------------------------------------------------------------------
+
+    _CURSOR_UPSERT_JS: str = """({ x, y, label }) => {
+        let overlay = document.getElementById('agy-agent-cursor');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'agy-agent-cursor';
+            overlay.setAttribute('aria-hidden', 'true');
+            overlay.style.cssText = [
+                'position: fixed !important',
+                'top: 0 !important',
+                'left: 0 !important',
+                'width: 0 !important',
+                'height: 0 !important',
+                'overflow: visible !important',
+                'z-index: 2147483647 !important',
+                'pointer-events: none !important',
+                'user-select: none !important',
+                'margin: 0 !important',
+                'padding: 0 !important',
+                'border: none !important',
+                'display: block !important',
+            ].join('; ');
+
+            const dot = document.createElement('div');
+            dot.id = 'agy-agent-cursor-dot';
+            dot.style.cssText = [
+                'position: absolute !important',
+                'left: -5px !important',
+                'top: -5px !important',
+                'width: 10px !important',
+                'height: 10px !important',
+                'border-radius: 50% !important',
+                'background-color: #2563eb !important',
+                'border: 2px solid #ffffff !important',
+                'box-shadow: 0 0 4px rgba(0,0,0,0.4) !important',
+                'pointer-events: none !important',
+            ].join('; ');
+
+            const labelEl = document.createElement('span');
+            labelEl.id = 'agy-agent-cursor-label';
+            labelEl.style.cssText = [
+                'position: absolute !important',
+                'left: 8px !important',
+                'top: -10px !important',
+                'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important',
+                'font-size: 11px !important',
+                'font-weight: 600 !important',
+                'line-height: 1 !important',
+                'color: #ffffff !important',
+                'background-color: #1e40af !important',
+                'padding: 2px 6px !important',
+                'border-radius: 4px !important',
+                'box-shadow: 0 1px 3px rgba(0,0,0,0.3) !important',
+                'white-space: nowrap !important',
+                'pointer-events: none !important',
+            ].join('; ');
+            labelEl.textContent = label || 'Agent';
+
+            overlay.appendChild(dot);
+            overlay.appendChild(labelEl);
+            const target = document.body || document.documentElement;
+            if (target) {
+                target.appendChild(overlay);
+            }
+        }
+        overlay.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        const labelEl = document.getElementById('agy-agent-cursor-label');
+        if (labelEl && label) {
+            labelEl.textContent = label;
+        }
+    }"""
+
+    _CURSOR_REMOVE_JS: str = """() => {
+        const overlay = document.getElementById('agy-agent-cursor');
+        if (overlay) overlay.remove();
+    }"""
+
+    async def _create_cursor_overlay(self) -> None:
+        """Create the visual #agy-agent-cursor DOM overlay if not present."""
+        await self._update_cursor_overlay(-100.0, -100.0, label="Agent")
+
+    async def _update_cursor_overlay(self, x: float, y: float, label: str = "Agent") -> None:
+        """Create or update position and label of the #agy-agent-cursor DOM overlay."""
+        if not self.tab.is_attached:
+            return
+        try:
+            await self.page.evaluate(self._CURSOR_UPSERT_JS, {"x": x, "y": y, "label": label})
+        except Exception as exc:
+            LOG.debug("Could not update agent cursor overlay: %s", exc)
+
+    async def _remove_cursor_overlay(self) -> None:
+        """Remove the #agy-agent-cursor DOM overlay if present."""
+        if not self.tab.is_attached:
+            return
+        try:
+            await self.page.evaluate(self._CURSOR_REMOVE_JS)
+        except Exception as exc:
+            LOG.debug("Could not remove agent cursor overlay: %s", exc)
 
     # -------------------------------------------------------------------------
     # DOM and Accessibility Inspection (Playwright Primary)
@@ -230,8 +337,17 @@ class BrowserSkills:
         if timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
         async with self.tab.lock:
+            locator = self.page.locator(selector)
             try:
-                await self.page.locator(selector).click(timeout=timeout_ms)
+                box = await locator.bounding_box(timeout=min(timeout_ms, 1000))
+                if box:
+                    center_x = box["x"] + box["width"] / 2.0
+                    center_y = box["y"] + box["height"] / 2.0
+                    await self._update_cursor_overlay(center_x, center_y, label="Agent: Click")
+            except Exception:
+                pass
+            try:
+                await locator.click(timeout=timeout_ms)
             except Exception as exc:
                 raise EngineError(f"Cannot click selector {selector!r}: {exc}") from exc
 
@@ -243,8 +359,16 @@ class BrowserSkills:
         if timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
         async with self.tab.lock:
+            locator = self.page.locator(selector)
             try:
-                locator = self.page.locator(selector)
+                box = await locator.bounding_box(timeout=min(timeout_ms, 1000))
+                if box:
+                    center_x = box["x"] + box["width"] / 2.0
+                    center_y = box["y"] + box["height"] / 2.0
+                    await self._update_cursor_overlay(center_x, center_y, label="Agent: Type")
+            except Exception:
+                pass
+            try:
                 await locator.focus(timeout=timeout_ms)
                 await self.page.keyboard.insert_text(text)
             except Exception as exc:
@@ -267,6 +391,7 @@ class BrowserSkills:
         if button not in {"left", "middle", "right"}:
             raise ValueError("button must be 'left', 'middle', or 'right'")
         async with self.tab.lock:
+            await self._update_cursor_overlay(x, y, label="Agent: Click")
             cdp = await self.tab.get_cdp_session()
             press = {
                 "type": "mousePressed",
@@ -295,6 +420,7 @@ class BrowserSkills:
         """Dispatch coordinate-based mouse move via CDPSession fallback."""
         self._check_attached()
         async with self.tab.lock:
+            await self._update_cursor_overlay(x, y, label="Agent: Move")
             cdp = await self.tab.get_cdp_session()
             await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
 
@@ -313,6 +439,7 @@ class BrowserSkills:
         if steps < 1:
             raise ValueError("steps must be at least 1")
         async with self.tab.lock:
+            await self._update_cursor_overlay(start_x, start_y, label="Agent: Drag")
             cdp = await self.tab.get_cdp_session()
             await cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": start_x, "y": start_y})
             await cdp.send(
@@ -324,11 +451,13 @@ class BrowserSkills:
                     t = i / steps
                     cur_x = start_x + (end_x - start_x) * t
                     cur_y = start_y + (end_y - start_y) * t
+                    await self._update_cursor_overlay(cur_x, cur_y, label="Agent: Drag")
                     await cdp.send(
                         "Input.dispatchMouseEvent",
                         {"type": "mouseMoved", "x": cur_x, "y": cur_y, "button": button},
                     )
             finally:
+                await self._update_cursor_overlay(end_x, end_y, label="Agent")
                 await asyncio.shield(
                     cdp.send(
                         "Input.dispatchMouseEvent",
