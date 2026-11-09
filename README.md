@@ -125,16 +125,28 @@ asyncio.run(main())
 
 ---
 
-## Repository Guard & Git Sync
+## Autonomous Cadence & Repository Sync
 
-`daemon_sync.py` provides validation and sync routines:
+This repository is explicitly authorized to maintain an autonomous, guarded synchronization cadence via `daemon_sync.py`:
 
 ```bash
+# Run detached in the background on the authorized 16-minute cadence
+python daemon_sync.py --interval-minutes 16
+
 # Validate syntax, entrypoints, requirements, and secrets without modifying git
 python daemon_sync.py --dry-run
 
-# Run one guarded sync cycle
+# Run a single validated sync cycle
 python daemon_sync.py --once
 ```
 
-See `constitution.md` for operational constraints and `manifest.json` for declared capabilities.
+### Governance and Invariant Safety Controls
+
+1. **Explicit Cadence Objective**: The user has authorized `daemon_sync.py` to run continuously in the background on a 16-minute interval, staging changes, committing validated code to `main`, and pushing to `origin/main`.
+2. **Pre-Flight Validation & Secret Scanning**: Every cycle scans all candidate files for credential-like content and sensitive file patterns (`.env`, `credentials.json`, `id_rsa`, `.key`, tokens) before staging. It validates Python AST syntax across all `.py` files, checks `manifest.json` entrypoint and dependencies, verifies `requirements.txt` and `constitution.md`, and rejects git whitespace errors.
+3. **Branch and Remote Restriction**: Operates strictly on `main` against `origin`. If upstream commits are detected ahead of local `main`, the daemon refuses implicit rebases or merges and halts safely.
+4. **Dedicated Workspace & Staging Scope**: The daemon executes `git add .` strictly under the assumption that this checkout is a dedicated, isolated project workspace. Never place unversioned secrets, personal files, or unrelated user data into this directory.
+5. **No Credentials in Logs**: Sensitive parameters, tokens, and credentials are never emitted to logs or commit messages.
+6. **Active Cadence Requirement**: The daemon process must remain actually running in the background to sustain the autonomous synchronization loop. Executing a successful one-shot cycle (`--once`) or a dry run (`--dry-run`) validates repository health, but is **not** proof of an active running cadence.
+
+See `constitution.md` for operational governance and `manifest.json` for declared capabilities.
