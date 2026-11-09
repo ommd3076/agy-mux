@@ -126,6 +126,35 @@ asyncio.run(main())
 
 ---
 
+## Testing
+
+The repository includes a standard-library `unittest` test suite covering pure unit behavior (`redact_headers`, `BoundedMetricQueue`, endpoint validation) and live integration against a dedicated, isolated ephemeral browser process.
+
+### Environment Setup
+
+Ensure required dependencies are installed in your active Python environment before running tests:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+### Running Tests
+
+```bash
+# Run unit tests only (fast, no browser required)
+python -m unittest tests/test_skills.py
+
+# Run live integration tests against an isolated ephemeral browser
+python -m unittest tests/test_live.py
+
+# Run all test suites via discovery
+python -m unittest discover -s tests -v
+```
+
+Live integration tests automatically allocate a dynamic loopback debugging port, an ephemeral profile directory, and cleanly terminate the browser process tree upon completion. If a Chromium/Edge binary is genuinely unavailable on the host, live tests report a descriptive skip without failing the suite.
+
+---
+
 ## Autonomous Cadence & Repository Sync
 
 This repository is explicitly authorized to maintain an autonomous, guarded synchronization cadence via `daemon_sync.py`:
