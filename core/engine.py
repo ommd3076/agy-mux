@@ -58,7 +58,10 @@ class CDPSession:
                 if method:
                     for queue in tuple(self._events.get(method, ())):
                         if queue.full():
-                            queue.get_nowait()
+                            discarded = queue.get_nowait()
+                            if method == "Fetch.requestPaused":
+                                task = asyncio.create_task(self._continue_unobserved_fetch(discarded))
+                                task.add_done_callback(self._log_resume_failure)
                         queue.put_nowait(payload)
         except asyncio.CancelledError:
             raise
@@ -84,6 +87,21 @@ class CDPSession:
             error = response["error"]
             raise CDPError(f"{method}: {error.get('message', error)}")
         return response.get("result", {})
+
+    async def _continue_unobserved_fetch(self, event: dict[str, Any]) -> None:
+        params = event.get("params", {})
+        request_id = params.get("requestId")
+        if not request_id:
+            return
+        method = "Fetch.continueResponse" if "responseStatusCode" in params or "responseErrorReason" in params else "Fetch.continueRequest"
+        await self.send(method, {"requestId": request_id})
+
+    @staticmethod
+    def _log_resume_failure(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except Exception:
+            LOG.exception("Failed to release an unobserved paused Fetch event")
 
     def events(self, method: str, *, max_queue: int = 64) -> asyncio.Queue[dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max_queue)

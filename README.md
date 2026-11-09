@@ -10,7 +10,7 @@ Run `python -m core.engine --endpoint http://127.0.0.1:9222` to list discoverabl
 
 ## Skills
 
-`BrowserSkills` provides accessibility tree retrieval, visible interactive element snapshots, selector-based CDP clicks, focused text insertion, passive response metadata observation, and opt-in paused response interception. Intercepted responses must be continued with `continue_response`; otherwise the page request remains paused. The engine does not rewrite response data. App-specific model APIs or MCP integrations should be preferred when available.
+`BrowserSkills` provides accessibility tree retrieval, visible interactive element snapshots, selector-based CDP clicks, focused text insertion, passive response metadata observation, and opt-in paused response interception. Intercepted responses must be continued with `continue_response`; otherwise the page request remains paused. Queue overflow automatically continues the oldest event unchanged, and stopping interception drains any queued response events. The engine does not rewrite response data. App-specific model APIs or MCP integrations should be preferred when available.
 
 ## Git sync
 

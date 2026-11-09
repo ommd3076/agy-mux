@@ -63,8 +63,15 @@ class BrowserSkills:
         if not result or not result.get("ok"):
             raise CDPError(f"Cannot click selector {selector!r}: {(result or {}).get('error', 'evaluation failed')}")
         async with self._input_lock:
-            await self.session.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": result["x"], "y": result["y"], "button": "left", "clickCount": 1})
-            await self.session.send("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": result["x"], "y": result["y"], "button": "left", "clickCount": 1})
+            release = {"type": "mouseReleased", "x": result["x"], "y": result["y"], "button": "left", "clickCount": 1}
+            pressed = True
+            try:
+                await self.session.send("Input.dispatchMouseEvent", {"type": "mousePressed", "x": result["x"], "y": result["y"], "button": "left", "clickCount": 1})
+                await self.session.send("Input.dispatchMouseEvent", release)
+                pressed = False
+            finally:
+                if pressed:
+                    await asyncio.shield(self.session.send("Input.dispatchMouseEvent", release))
 
     async def type_text(self, selector: str, text: str, *, timeout_ms: int = 5000) -> None:
         if not selector.strip():
@@ -94,6 +101,8 @@ class BrowserSkills:
         """Pause responses for explicit inspection; each event must be continued."""
         if not 1 <= buffer_size <= 1024:
             raise ValueError("buffer_size must be between 1 and 1024")
+        if self.session._events.get("Fetch.requestPaused"):
+            raise CDPError("response interception is already active for this CDP target")
         queue = self.session.events("Fetch.requestPaused", max_queue=buffer_size)
         try:
             await self.session.send("Fetch.enable", {
@@ -117,7 +126,11 @@ class BrowserSkills:
             await self.session.send("Fetch.continueRequest", {"requestId": request_id})
 
     async def stop_response_interception(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
-        """Stop interception after the caller has continued all queued responses."""
+        """Release queued responses unchanged, then disable interception."""
+        if queue not in self.session._events.get("Fetch.requestPaused", set()):
+            raise ValueError("queue is not registered for Fetch.requestPaused")
+        while not queue.empty():
+            await self.continue_response(queue.get_nowait())
         self.session.remove_events("Fetch.requestPaused", queue)
         if not self.session._events.get("Fetch.requestPaused"):
             await self.session.send("Fetch.disable")
